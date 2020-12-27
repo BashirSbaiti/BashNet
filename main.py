@@ -2,58 +2,78 @@ import os
 import pretty_midi as pm
 from pretty_midi.reverse_pianoroll import piano_roll_to_pretty_midi
 import numpy as np
-import keras
-import tensorflow as tf
+from tensorflow import keras
 
 fps = 40  # sampling frequency, sample one every 1/fps sec
 
 pianoRolls = []
-for file in os.listdir("midis"):
-    pmObj = pm.PrettyMIDI("midis/" + file)
+direc = "MIDIS"
+cutofflen = 4000
+count = 0
+for file in os.listdir(direc):
+    pmObj = pm.PrettyMIDI(direc + "/" + file)
     pmObj = pmObj.instruments[0]
     pianoRoll = pmObj.get_piano_roll(fs=fps)  # a piano roll is np.array (notes, Tx)
-    if len(pianoRolls) == 0:
-        pianoRolls = pianoRoll
-    else:
-        pianoRolls = np.concatenate((pianoRolls, pianoRoll), axis=1)
+    if pianoRoll.shape[1] >= cutofflen:
+        print(file + " \t" + str(count))
+        count += 1
+        pianoRoll = pianoRoll[:, 0:cutofflen]
+        pianoRoll = np.reshape(pianoRoll, [pianoRoll.shape[0], pianoRoll.shape[1], 1])
+        if len(pianoRolls) == 0:
+            pianoRolls = np.reshape(pianoRoll, [pianoRoll.shape[0], pianoRoll.shape[1], 1])
+        else:
+            pianoRolls = np.concatenate((pianoRolls, pianoRoll),
+                                        axis=2)  # final pianorolls array will be (notes, Tx, song)
 
-total = 0
-num = 0
 notes = []
 
-for c in range(pianoRolls.shape[1]):
-    noteLst = []
-    for r in range(pianoRolls.shape[0]):
-        if pianoRolls[r, c] != 0:
-            noteLst.append(str(r))
-    noteStr = ','.join(noteLst)
-    notes.append(noteStr)
+print(pianoRolls.shape)
+
+for song in range(pianoRolls.shape[2]):
+    for c in range(pianoRolls.shape[1]):
+        noteLst = []
+        for r in range(pianoRolls.shape[0]):  # flatten so that each time step has a string of all notes being played
+            if pianoRolls[r, c, song] != 0:  # note number is given by row number
+                noteLst.append(str(r))
+        noteStr = ','.join(noteLst)
+        notes.append(noteStr)
 
 c = 0
 noteToInt = dict()
-for notename in sorted(set(notes)):
+for notename in sorted(set(notes)):  # map every unique string in aforementioned flat list to integers
     noteToInt.update({notename: c})
     c += 1
 
 intToNote = dict()
-for key, value in noteToInt.items():
+for key, value in noteToInt.items():  # make inverse (map int to string)
     intToNote.update({value: key})
 
 notesInt = []
 for note in notes:
-    notesInt.append(noteToInt[note])
+    notesInt.append(noteToInt[note])  # use mapping to make notes an int array (1, Tx*songs)
 
 
 def onehot(a):
-    temp = np.zeros((a.max() + 1, a.size), dtype="uint8")
+    temp = np.zeros((len(intToNote), a.size), dtype="uint8")  # convert array to onehot (nx, Tx)
     for index, value in enumerate(a):
         temp[value, index] = 1
     return temp
 
-inp = onehot(np.array(notesInt))
+
+inp = []
+for i in range(42):  # inp in shape (notescombos, tx, songs)
+    if len(inp) == 0:
+        inp = onehot(np.array(notesInt[0:cutofflen]))
+        inp = inp.reshape([inp.shape[0], inp.shape[1], 1])
+    else:
+        add = onehot(np.array(notesInt[cutofflen * (i - 1): cutofflen * i]))
+        add = add.reshape([add.shape[0], add.shape[1], 1])
+        inp = np.concatenate((inp, add), axis=2)
+
+print(inp.shape)
 
 
-def decodeOh(a):
+def decodeOh(a):  # turns back into piano roll
     notesStrs = list()
     for ohVec in range(a.shape[1]):
         notesStrs.append(intToNote[np.argmax(a[:, ohVec])])
@@ -67,41 +87,5 @@ def decodeOh(a):
                 pr[inte, indx] = 60
     return pr
 
-pm = piano_roll_to_pretty_midi(decodeOh(inp)).write("out/test2.mid")
 
-def create_model(seq_len, unique_notes, dropout=0.3, output_emb=100, rnn_unit=128, dense_unit=64):  # TODO: this
-    inputs = keras.layers.Input(shape=(seq_len,))
-    embedding = keras.layers.Embedding(input_dim=unique_notes + 1, output_dim=output_emb, input_length=seq_len)(inputs)
-    forward_pass = keras.layers.Bidirectional(keras.layers.GRU(rnn_unit, return_sequences=True))(embedding)
-    forward_pass, att_vector = tf.SeqSelfAttention(
-        return_attention=True,
-        attention_activation='sigmoid',
-        attention_type=tf.SeqSelfAttention.ATTENTION_TYPE_MUL,
-        attention_width=50,
-        kernel_regularizer=keras.regularizers.l2(1e-4),
-        bias_regularizer=keras.regularizers.l1(1e-4),
-        attention_regularizer_weight=1e-4,
-    )(forward_pass)
-    forward_pass = keras.layers.Dropout(dropout)(forward_pass)
-    forward_pass = keras.layers.Bidirectional(keras.layers.GRU(rnn_unit, return_sequences=True))(forward_pass)
-    forward_pass, att_vector2 = tf.SeqSelfAttention(
-        return_attention=True,
-        attention_activation='sigmoid',
-        attention_type=tf.SeqSelfAttention.ATTENTION_TYPE_MUL,
-        attention_width=50,
-        kernel_regularizer=keras.regularizers.l2(1e-4),
-        bias_regularizer=keras.regularizers.l1(1e-4),
-        attention_regularizer_weight=1e-4,
-    )(forward_pass)
-    forward_pass = keras.layers.Dropout(dropout)(forward_pass)
-    forward_pass = keras.layers.Bidirectional(keras.layers.GRU(rnn_unit))(forward_pass)
-    forward_pass = keras.layers.Dropout(dropout)(forward_pass)
-    forward_pass = keras.layers.Dense(dense_unit)(forward_pass)
-    forward_pass = keras.layers.LeakyReLU()(forward_pass)
-    outputs = keras.layers.Dense(unique_notes + 1, activation="softmax")(forward_pass)
-
-    model = keras.Model(inputs=inputs, outputs=outputs, name='generate_scores_rnn')
-    return model
-
-
-# model = create_model(128, 128)
+pm = piano_roll_to_pretty_midi(decodeOh(inp[:, :, 8]), fs=fps).write("out/test2.mid")
