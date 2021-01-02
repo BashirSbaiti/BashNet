@@ -15,26 +15,25 @@ for file in os.listdir(direc):
     pmObj = pmObj.instruments[0]
     pianoRoll = pmObj.get_piano_roll(fs=fps)  # a piano roll is np.array (notes, Tx)
     if pianoRoll.shape[1] >= cutofflen:
-        print(file + " \t" + str(count))
         count += 1
         pianoRoll = pianoRoll[:, 0:cutofflen]
-        pianoRoll = np.reshape(pianoRoll, [pianoRoll.shape[0], pianoRoll.shape[1], 1])
+        pianoRoll = np.reshape(pianoRoll, [1, pianoRoll.shape[1], pianoRoll.shape[0]])
         if len(pianoRolls) == 0:
-            pianoRolls = np.reshape(pianoRoll, [pianoRoll.shape[0], pianoRoll.shape[1], 1])
+            pianoRolls = pianoRoll
         else:
             pianoRolls = np.concatenate((pianoRolls, pianoRoll),
-                                        axis=2)  # final pianorolls array will be (notes, Tx, song)
+                                        axis=0)  # final pianorolls array will be (notes, Tx, song)
 
 notes = []
 
 print(pianoRolls.shape)
 
-for song in range(pianoRolls.shape[2]):
-    for c in range(pianoRolls.shape[1]):
+for song in range(pianoRolls.shape[0]):
+    for timestep in range(pianoRolls.shape[1]):
         noteLst = []
-        for r in range(pianoRolls.shape[0]):  # flatten so that each time step has a string of all notes being played
-            if pianoRolls[r, c, song] != 0:  # note number is given by row number
-                noteLst.append(str(r))
+        for notenum in range(pianoRolls.shape[2]):  # flatten so that each time step has a string of all notes being played
+            if pianoRolls[song, timestep, notenum] != 0:  # note number is given by row number
+                noteLst.append(str(notenum))
         noteStr = ','.join(noteLst)
         notes.append(noteStr)
 
@@ -57,26 +56,24 @@ def onehot(a):
     temp = np.zeros((len(intToNote), a.size), dtype="uint8")  # convert array to onehot (nx, Tx)
     for index, value in enumerate(a):
         temp[value, index] = 1
-    return temp
+    return temp.T  # (Tx , nx)
 
 
 inp = []
-for i in range(42):  # inp in shape (notescombos, tx, songs)
+for i in range(pianoRolls.shape[0]):  # inp in shape (notescombos, tx, songs)
     if len(inp) == 0:
         inp = onehot(np.array(notesInt[0:cutofflen]))
-        inp = inp.reshape([inp.shape[0], inp.shape[1], 1])
+        inp = inp.reshape([1, inp.shape[0], inp.shape[1]])
     else:
         add = onehot(np.array(notesInt[cutofflen * (i - 1): cutofflen * i]))
-        add = add.reshape([add.shape[0], add.shape[1], 1])
-        inp = np.concatenate((inp, add), axis=2)
-
-print(inp.shape)
+        add = add.reshape([1, add.shape[0], add.shape[1]])
+        inp = np.concatenate((inp, add), axis=0)
 
 
 def decodeOh(a):  # turns back into piano roll
     notesStrs = list()
-    for ohVec in range(a.shape[1]):
-        notesStrs.append(intToNote[np.argmax(a[:, ohVec])])
+    for ohVec in range(a.shape[0]):
+        notesStrs.append(intToNote[np.argmax(a[ohVec, :])])
     pr = np.zeros((128, len(notesStrs)))
     for indx, str in enumerate(notesStrs):
         for st in str.split(','):
@@ -88,4 +85,5 @@ def decodeOh(a):  # turns back into piano roll
     return pr
 
 
-pm = piano_roll_to_pretty_midi(decodeOh(inp[:, :, 8]), fs=fps).write("out/test2.mid")
+print(inp.shape)
+pm = piano_roll_to_pretty_midi(decodeOh(inp[8, :, :]), fs=(fps / 1.25)).write("out/test2.mid")
